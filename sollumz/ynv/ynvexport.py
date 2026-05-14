@@ -67,19 +67,53 @@ def _compress_centroid(centroid: Vector, poly_min: Vector, poly_max: Vector) -> 
     return max(0, min(255, cx)), max(0, min(255, cy))
 
 
+_EDGE_POS_EPS = 3  # round vertex coordinates to this many decimals for matching
+
+
+def _build_boundary_edge_index(mesh) -> dict[tuple, list[int]]:
+    """Index every polygon edge by its rounded XYZ positions.
+
+    The returned dict maps ``(sorted_pos_a, sorted_pos_b)`` to the list of
+    polygon indices that own that edge in ``mesh``. We round to
+    ``_EDGE_POS_EPS`` decimals so float noise between cells doesn't break the
+    match — CodeWalker stores positions at ~1mm precision in the source XML.
+    """
+    idx: dict[tuple, list[int]] = {}
+    verts = mesh.vertices
+    for face in mesh.polygons:
+        n = len(face.vertices)
+        for i in range(n):
+            v0 = face.vertices[i]
+            v1 = face.vertices[(i + 1) % n]
+            p0 = tuple(round(float(c), _EDGE_POS_EPS) for c in verts[v0].co)
+            p1 = tuple(round(float(c), _EDGE_POS_EPS) for c in verts[v1].co)
+            key = (p0, p1) if p0 < p1 else (p1, p0)
+            idx.setdefault(key, []).append(face.index)
+    return idx
+
+
 def _polygons_from_mesh(
     mesh,
     area_id: int,
     recompute_small_large: bool,
     recompute_edges: bool,
+    sibling_indices: dict[int, dict[tuple, list[int]]] | None = None,
 ) -> tuple[list[NavPolygon], bool]:
     """Walk every face, repack flag bytes from FACE attrs, edges from EDGE attrs.
 
     When ``recompute_edges`` is True (the default), we ignore the stored
     adjacency for internal edges and look up the actual neighbouring polygon
     in the current mesh — this is what keeps the file consistent after a poly
-    has been added or deleted. Boundary edges (no neighbour in this mesh) still
-    fall back to the stored external reference so cross-cell stitching works.
+    has been added or deleted.
+
+    For boundary edges (no neighbour in this mesh):
+      * If a sibling navmesh with that ``area_id`` was provided in
+        ``sibling_indices``, we look up the edge by rounded XYZ positions to
+        find the new poly index there. If the polygon was deleted/moved in the
+        sibling, we emit ``16383:16383`` (no neighbour) — which is safe and
+        won't crash the game.
+      * Otherwise we keep whatever was stored in the EDGE attrs (lets stitching
+        survive single-cell edits where adjacent cells aren't being touched).
     """
     if not has_navmesh_attributes(mesh):
         raise ValueError(
@@ -169,14 +203,35 @@ def _polygons_from_mesh(
                 edge_list.append((area_id & 0xFFFF, neighbour_idx & 0xFFFF))
                 continue
 
-            # No internal neighbour (boundary edge, OR recompute disabled) —
-            # fall back to whatever was stored for this edge.
+            # Boundary edge. Read the stored adjacency first — it tells us
+            # which sibling cell this edge used to point at.
             edge_idx = edge_index_by_pair.get(key)
-            if edge_idx is None:
-                edge_list.append((ADJACENT_NONE, ADJACENT_NONE))
+            stored_area = ADJACENT_NONE
+            stored_poly = ADJACENT_NONE
+            if edge_idx is not None:
+                stored_area = area_data[edge_idx].value & 0xFFFF
+                stored_poly = poly_data[edge_idx].value & 0xFFFF
+
+            # If that sibling is being exported alongside us, look up the edge
+            # by world-space vertex positions and emit the sibling's current
+            # poly index. A missing match means the sibling polygon was
+            # deleted/moved — emit ADJACENT_NONE so the game gracefully treats
+            # this as a dead end instead of crashing on a stale index.
+            if (recompute_edges
+                    and sibling_indices is not None
+                    and stored_area != ADJACENT_NONE
+                    and stored_area != area_id
+                    and stored_area in sibling_indices):
+                p0 = tuple(round(float(c), _EDGE_POS_EPS) for c in mesh.vertices[v0].co)
+                p1 = tuple(round(float(c), _EDGE_POS_EPS) for c in mesh.vertices[v1].co)
+                pos_key = (p0, p1) if p0 < p1 else (p1, p0)
+                hits = sibling_indices[stored_area].get(pos_key, ())
+                if hits:
+                    edge_list.append((stored_area, hits[0] & 0xFFFF))
+                else:
+                    edge_list.append((ADJACENT_NONE, ADJACENT_NONE))
                 continue
-            stored_area = area_data[edge_idx].value & 0xFFFF
-            stored_poly = poly_data[edge_idx].value & 0xFFFF
+
             edge_list.append((stored_area, stored_poly))
 
         poly_xml = NavPolygon()
@@ -211,8 +266,38 @@ def _point_from_obj(point_obj) -> NavPoint:
     return p
 
 
-def navmesh_from_object(navmesh_obj) -> Optional[Navmesh]:
-    """Build the in-memory CWXML object for ``navmesh_obj``."""
+def _collect_sibling_indices(navmesh_obj, own_area_id: int) -> dict[int, dict[tuple, list[int]]]:
+    """Find every other NAVMESH in the scene and index its boundary edges.
+
+    Result: ``{area_id: edge_pos_index}``. ``edge_pos_index`` maps a sorted
+    pair of rounded XYZ positions to the polygon index(es) sharing that edge.
+    """
+    import bpy as _bpy  # local import to keep this file lightweight to load
+
+    out: dict[int, dict[tuple, list[int]]] = {}
+    for obj in _bpy.context.scene.objects:
+        if obj is navmesh_obj or obj.sollum_type != SollumType.NAVMESH:
+            continue
+        polymesh = _find_polymesh(obj)
+        if polymesh is None:
+            continue
+        sibling_area = int(obj.sz_navmesh.area_id)
+        if sibling_area == own_area_id:
+            continue
+        out[sibling_area] = _build_boundary_edge_index(polymesh.data)
+    return out
+
+
+def navmesh_from_object(
+    navmesh_obj,
+    sibling_indices: dict[int, dict[tuple, list[int]]] | None = None,
+) -> Optional[Navmesh]:
+    """Build the in-memory CWXML object for ``navmesh_obj``.
+
+    Pass ``sibling_indices`` (from :func:`_collect_sibling_indices`) when other
+    cells are being exported in the same pass so cross-cell edge stitching can
+    be repaired against their current geometry.
+    """
     if navmesh_obj.sollum_type != SollumType.NAVMESH:
         logger.error(f"'{navmesh_obj.name}' is not a NAVMESH root object.")
         return None
@@ -226,11 +311,15 @@ def navmesh_from_object(navmesh_obj) -> Optional[Navmesh]:
     nav = Navmesh()
     nav.area_id = int(props.area_id)
 
+    if sibling_indices is None:
+        sibling_indices = _collect_sibling_indices(navmesh_obj, int(props.area_id))
+
     polygons, has_water = _polygons_from_mesh(
         polymesh.data,
         int(props.area_id),
         props.auto_recompute_small_large,
         props.auto_recompute_edges,
+        sibling_indices,
     )
     nav.polygons = polygons
 
@@ -279,8 +368,9 @@ def navmesh_from_object(navmesh_obj) -> Optional[Navmesh]:
     return nav
 
 
-def export_ynv(navmesh_obj, filepath: str) -> bool:
-    nav = navmesh_from_object(navmesh_obj)
+def export_ynv(navmesh_obj, filepath: str,
+               sibling_indices: dict[int, dict[tuple, list[int]]] | None = None) -> bool:
+    nav = navmesh_from_object(navmesh_obj, sibling_indices=sibling_indices)
     if nav is None:
         return False
     YNV.write_xml(nav, filepath)

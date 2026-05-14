@@ -1,0 +1,23 @@
+schema_version = "1.0.0"
+
+id = "sollumz"
+version = "2.8.3"
+name = "Sollumz"
+tagline = "Grand Theft Auto V modding suite for Blender"
+maintainer = "alexguirre <alexguirre.aa@gmail.com>"
+type = "add-on"
+
+website = "https://docs.sollumz.org"
+
+tags = ["Import-Export"]
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+copyright = ["2020-2025 Skylumz, Colton and alexguirre"]
+
+[permissions]
+files = "Import/export RAGE asset files. Save/load presets."
+clipboard = "Copy/paste location and rotation of objects."
+network = "Install dependencies."
+

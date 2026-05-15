@@ -16,6 +16,7 @@ from .navmesh_attributes import (
     parse_edges_str,
     parse_flags_str,
 )
+from .navmesh_colors import flags_to_color
 from .navmesh_material import get_navmesh_material
 
 
@@ -80,6 +81,15 @@ def _polygons_to_obj(name: str, polygons) -> bpy.types.Object:
         cy_data[i].value = cy
         has_data[i].value = 1
 
+    # Face color attribute, used by Solid-mode viewport shading. The
+    # attribute lives on the CORNER domain, so we paint each loop of every
+    # face with the same color (gives a per-face look).
+    color_data = mesh.color_attributes[NavMeshAttr.POLY_COLOR.value].data
+    for face_idx, flags in enumerate(face_flags):
+        color = flags_to_color(flags[0], flags[1], flags[2])
+        for loop_idx in mesh.polygons[face_idx].loop_indices:
+            color_data[loop_idx].color = color
+
     # EDGE-domain adjacency. Blender re-orders edges versus the order we fed in
     # to ``from_pydata``, so we map them back via (v_start, v_end) pairs.
     edge_lookup: dict[tuple[int, int], tuple[int, int]] = {}
@@ -102,6 +112,16 @@ def _polygons_to_obj(name: str, polygons) -> bpy.types.Object:
         poly_data[edge.index].value = poly_idx
 
     mesh.materials.append(get_navmesh_material())
+
+    # Make the navmesh color attribute the active one for rendering so the
+    # user sees it immediately when switching the viewport to Solid + Color
+    # = Attribute.
+    if NavMeshAttr.POLY_COLOR.value in mesh.color_attributes:
+        idx = list(mesh.color_attributes).index(
+            mesh.color_attributes[NavMeshAttr.POLY_COLOR.value]
+        )
+        mesh.color_attributes.render_color_index = idx
+        mesh.color_attributes.active_color_index = idx
 
     obj = bpy.data.objects.new(name, mesh)
     obj.sollum_type = SollumType.NAVMESH_POLY_MESH

@@ -28,15 +28,26 @@ class NavMeshAttr(str, Enum):
     POLY_CENTROID_X = ".navmesh.poly_centroid_x"
     POLY_CENTROID_Y = ".navmesh.poly_centroid_y"
     POLY_HAS_CENTROID = ".navmesh.poly_has_centroid"  # 0 = new poly, recompute
+    # Float-RGBA color attribute on the CORNER (face-corner) domain.
+    # CORNER is the only domain Blender's Solid viewport will sample for a
+    # color attribute — FACE domain looks visually identical but the
+    # viewport renderer skips it. Filled at import time from the flag
+    # bytes; each face's loops all get the same color so it reads like a
+    # per-face shading.
+    POLY_COLOR = "navmesh_color"
     EDGE_ADJACENT_AREA = ".navmesh.edge_adjacent_area"
     EDGE_ADJACENT_POLY = ".navmesh.edge_adjacent_poly"
 
     @property
     def blender_type(self) -> str:
+        if self == NavMeshAttr.POLY_COLOR:
+            return "FLOAT_COLOR"
         return "INT"
 
     @property
     def domain(self) -> str:
+        if self == NavMeshAttr.POLY_COLOR:
+            return "CORNER"
         if self.name.startswith("POLY"):
             return "FACE"
         return "EDGE"
@@ -58,7 +69,13 @@ EDGE_ATTRS = (
 
 def ensure_navmesh_attributes(mesh: Mesh) -> None:
     for attr in NavMeshAttr:
-        if attr.value not in mesh.attributes:
+        if attr.value in mesh.attributes:
+            continue
+        # Color attributes need to be created via ``color_attributes`` so the
+        # viewport's Solid-mode renderer registers them as a sampling source.
+        if attr.blender_type in {"FLOAT_COLOR", "BYTE_COLOR"}:
+            mesh.color_attributes.new(attr.value, attr.blender_type, attr.domain)
+        else:
             mesh.attributes.new(attr.value, attr.blender_type, attr.domain)
 
 
@@ -66,35 +83,68 @@ def has_navmesh_attributes(mesh: Mesh) -> bool:
     return all(attr.value in mesh.attributes for attr in NavMeshAttr)
 
 
-# --- flag-bit constants (per CodeWalker 30+, see QOL fork's notes) -----------
+# --- flag-bit constants (per CodeWalker UI; the QOL fork's names disagree
+# in several places, e.g. it calls flag0 bits 0/1 "Small/Large" but they are
+# really AvoidUnk0/1, and it claims flag1's low nibble is audio properties
+# while CodeWalker labels it UndergroundUnk0..3) -----------------------------
+
 # flag0
-FLAG0_SMALL = 1            # area < 2.0 (computed on export)
-FLAG0_LARGE = 2            # area > 40.0 (computed on export)
-FLAG0_PAVEMENT = 4
-FLAG0_IN_SHELTER = 8
-FLAG0_TOO_STEEP = 64
+FLAG0_AVOID_UNK0 = 1
+FLAG0_AVOID_UNK1 = 2
+FLAG0_FOOTPATH = 4         # was 'Pavement' in QOL
+FLAG0_UNDERGROUND = 8      # was 'InShelter' in QOL
+# bits 4, 5 unused
+FLAG0_STEEP_SLOPE = 64     # was 'TooSteepToWalkOn'
 FLAG0_WATER = 128
 
-# flag1: low nibble = audio properties, high bits = misc
-FLAG1_AUDIO_MASK = 0x0F
-FLAG1_NEAR_CAR_NODE = 32
+# flag1
+FLAG1_UNDERGROUND_UNK0 = 1
+FLAG1_UNDERGROUND_UNK1 = 2
+FLAG1_UNDERGROUND_UNK2 = 4
+FLAG1_UNDERGROUND_UNK3 = 8
+# bit 4 unused
+FLAG1_HAS_PATH_NODE = 32   # was 'NearCarNode' in QOL
 FLAG1_INTERIOR = 64
-FLAG1_ISOLATED = 128
+FLAG1_INTERACTION_UNK = 128  # NOT 'Isolated' as QOL suggested
 
-# flag2: low bits = misc, high 3 bits = ped density
-FLAG2_NETWORK_SPAWN = 1
-FLAG2_ROAD = 2
-FLAG2_LIES_ALONG_EDGE = 4
-FLAG2_TRAIN_TRACK = 8
+# flag2 — bit numbers as labelled in the 3ds Max ONV tool (one bit per row).
+# Deleting polygons that carry IsFlatGround (bit 0) crashes the game; the
+# binary .ynv builds a separate spawn-spatial index over them. Strip the
+# flag instead, or mark the polygon as Isolated.
+FLAG2_FLAT_GROUND   = 1
+FLAG2_ROAD          = 2
+FLAG2_CELL_EDGE     = 4    # was 'LiesAlongEdge' in QOL
+FLAG2_TRAIN_TRACK   = 8
 FLAG2_SHALLOW_WATER = 16
-FLAG2_PED_DENSITY_MASK = 0xE0
-FLAG2_PED_DENSITY_SHIFT = 5
+FLAG2_FOOTPATH_UNK1 = 32
+FLAG2_FOOTPATH_UNK2 = 64
+FLAG2_FOOTPATH_MALL = 128
 
-# flag3: cover directions, 8 bits — one bit per 45-degree direction
-# (bit 0: +Y, bit 1: -X+Y, bit 2: -X, bit 3: -X-Y, bit 4: -Y,
-#  bit 5: +X-Y, bit 6: +X, bit 7: +X+Y)
+# flag3 — slope directions (one bit per 45° wedge, names from CodeWalker UI).
+FLAG3_SLOPE_SOUTH = 1
+FLAG3_SLOPE_SOUTH_EAST = 2
+FLAG3_SLOPE_EAST = 4
+FLAG3_SLOPE_NORTH_EAST = 8
+FLAG3_SLOPE_NORTH = 16
+FLAG3_SLOPE_NORTH_WEST = 32
+FLAG3_SLOPE_WEST = 64
+FLAG3_SLOPE_SOUTH_WEST = 128
 
 # flag4: only bit 0 used = is DLC stitch poly
+
+# --- back-compat aliases (operators / colors written before the rename) -----
+# Keep these so external user scripts and any cached references in the
+# extension build keep importing cleanly. Drop after a couple of releases.
+FLAG0_PAVEMENT = FLAG0_FOOTPATH
+FLAG0_IN_SHELTER = FLAG0_UNDERGROUND
+FLAG0_TOO_STEEP = FLAG0_STEEP_SLOPE
+FLAG0_SMALL = FLAG0_AVOID_UNK0
+FLAG0_LARGE = FLAG0_AVOID_UNK1
+FLAG1_NEAR_CAR_NODE = FLAG1_HAS_PATH_NODE
+FLAG1_ISOLATED = FLAG1_INTERACTION_UNK
+FLAG2_UNK0 = FLAG2_FLAT_GROUND           # legacy name during the rename
+FLAG2_NETWORK_SPAWN = FLAG2_FLAT_GROUND  # legacy name from QOL fork
+FLAG2_LIES_ALONG_EDGE = FLAG2_CELL_EDGE
 
 
 # Adjacency: a 14-bit value of all 1s means "no neighbor"

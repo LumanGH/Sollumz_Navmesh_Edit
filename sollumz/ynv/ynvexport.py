@@ -14,8 +14,6 @@ from .cwxml_navmesh import (
 )
 from .navmesh_attributes import (
     ADJACENT_NONE,
-    FLAG0_LARGE,
-    FLAG0_SMALL,
     FLAG0_WATER,
     NavMeshAttr,
     POLY_FLAG_ATTRS,
@@ -23,10 +21,6 @@ from .navmesh_attributes import (
     format_flags_str,
     has_navmesh_attributes,
 )
-
-# Match QOL fork's poly-area thresholds.
-POLY_SMALL_MAX_AREA = 2.0
-POLY_LARGE_MIN_AREA = 40.0
 
 # Centroid is encoded as a single byte per axis, range 0..255.
 POLY_BBOX_RESOLUTION = 0.25
@@ -158,13 +152,12 @@ def _polygons_from_mesh(
         f3 = flag_data[3][face.index].value & 0xFF
         f4 = flag_data[4][face.index].value & 0xFF
 
-        if recompute_small_large:
-            f0 &= ~(FLAG0_SMALL | FLAG0_LARGE)
-            area = face.area
-            if area < POLY_SMALL_MAX_AREA:
-                f0 |= FLAG0_SMALL
-            elif area > POLY_LARGE_MIN_AREA:
-                f0 |= FLAG0_LARGE
+        # NOTE: ``recompute_small_large`` used to mask flag0 bits 0/1 here as
+        # if they were computed Small/Large markers. They are actually
+        # CodeWalker's AvoidUnk0/AvoidUnk1 — user-set avoidance hints. We now
+        # leave them alone; the parameter is accepted for API compatibility
+        # but intentionally has no effect.
+        _ = recompute_small_large
 
         if f0 & FLAG0_WATER:
             has_water = True
@@ -251,19 +244,31 @@ def _polygons_from_mesh(
     return out, has_water
 
 
+# Portal endpoints are expected to sit on their target polygon (~ground level).
+# When the nearest polygon is farther than this threshold (m), it means the
+# polygon the portal used to live on has been deleted — there's no sane
+# replacement, so the portal must be dropped from the export.
+PORTAL_REPAIR_MAX_DIST = 5.0
+
+# NavPoints (spawn/cover) sit on top of a walkable polygon. To keep a point
+# we require a polygon close in XY (the point should project onto the polygon)
+# AND close enough in Z (the polygon shouldn't be 100m below — that means the
+# user sank it and the point is orphaned). Both checks together are what
+# stops peds from spawning at sunk areas and standing still.
+NAVPOINT_KEEP_XY_DIST = 2.5
+NAVPOINT_KEEP_Z_DIST = 8.0  # allows rooftop / elevated walkway points
+
+
 def _find_nearest_poly_in_area(
     pos: Vector,
     own_polymesh,
     own_area_id: int,
     sibling_meshes: dict[int, "bpy.types.Mesh"],
     target_area: int,
-) -> int:
-    """Return the polygon index in ``target_area`` whose centre is closest to ``pos``.
+) -> tuple[int, float]:
+    """Return ``(poly_index, distance)`` for the closest polygon centre to ``pos``.
 
-    ``own_area_id`` covers the current navmesh we are exporting; other areas
-    must be present in ``sibling_meshes`` to be resolvable. Returns the
-    original stored index when the target area is unknown (we cannot improve
-    on it without the data).
+    Returns ``(-1, inf)`` when ``target_area`` is not present in the scene.
     """
     mesh = None
     if target_area == own_area_id:
@@ -271,19 +276,19 @@ def _find_nearest_poly_in_area(
     else:
         mesh = sibling_meshes.get(target_area)
     if mesh is None or len(mesh.polygons) == 0:
-        return -1
+        return -1, float("inf")
     best_idx = -1
-    best_dist = float("inf")
+    best_dist_sq = float("inf")
     for face in mesh.polygons:
         c = face.center
         dx = c[0] - pos[0]
         dy = c[1] - pos[1]
         dz = c[2] - pos[2]
         d = dx * dx + dy * dy + dz * dz
-        if d < best_dist:
-            best_dist = d
+        if d < best_dist_sq:
+            best_dist_sq = d
             best_idx = face.index
-    return best_idx
+    return best_idx, best_dist_sq ** 0.5
 
 
 def _portal_from_obj(
@@ -292,39 +297,54 @@ def _portal_from_obj(
     own_area_id: int,
     sibling_meshes: dict[int, "bpy.types.Mesh"],
     repair_indices: bool,
-) -> NavPortal:
+) -> Optional[NavPortal]:
+    """Build a NavPortal. Returns ``None`` when the portal's endpoint(s) no
+    longer sit on any polygon — that means the underlying polygons were
+    deleted and the portal is now orphaned. Keeping it would write a stale
+    index that the game dereferences and crashes on, so we drop it instead.
+    """
     props = portal_obj.sz_nav_portal
     from_child = next((c for c in portal_obj.children if c.name.startswith("from")), None)
     to_child = next((c for c in portal_obj.children if c.name.startswith("to")), None)
 
-    p = NavPortal()
-    p.type = int(props.portal_type)
-    p.angle = float(props.angle)
-    p.position_from = Vector(from_child.matrix_world.translation) if from_child else Vector(portal_obj.location)
-    p.position_to = Vector(to_child.matrix_world.translation) if to_child else Vector(portal_obj.location)
+    pos_from = Vector(from_child.matrix_world.translation) if from_child else Vector(portal_obj.location)
+    pos_to = Vector(to_child.matrix_world.translation) if to_child else Vector(portal_obj.location)
 
     poly_from = int(props.poly_from)
     poly_to = int(props.poly_to)
 
     if repair_indices:
-        # PolyFrom/PolyTo are indices into the navmesh's polygon list. They
-        # become stale the moment any polygon is added or deleted. We rebuild
-        # them by finding the polygon whose centre is closest to the portal's
-        # from/to position. Portal endpoints are expected to sit on top of
-        # their target polygon, so the nearest-centroid heuristic is enough.
-        new_from = _find_nearest_poly_in_area(
-            p.position_from, own_polymesh, own_area_id, sibling_meshes, own_area_id,
+        new_from, dist_from = _find_nearest_poly_in_area(
+            pos_from, own_polymesh, own_area_id, sibling_meshes, own_area_id,
         )
-        if new_from >= 0:
-            poly_from = new_from
-        new_to = _find_nearest_poly_in_area(
-            p.position_to, own_polymesh, own_area_id, sibling_meshes, own_area_id,
-        )
-        if new_to >= 0:
-            poly_to = new_to
+        if new_from < 0 or dist_from > PORTAL_REPAIR_MAX_DIST:
+            logger.warning(
+                f"Dropping portal '{portal_obj.name}': PositionFrom is "
+                f"{dist_from:.2f}m away from the nearest polygon (max "
+                f"{PORTAL_REPAIR_MAX_DIST}m). The polygon it lived on was "
+                f"probably deleted."
+            )
+            return None
+        poly_from = new_from
 
-    p.poly_from = poly_from
-    p.poly_to = poly_to
+        new_to, dist_to = _find_nearest_poly_in_area(
+            pos_to, own_polymesh, own_area_id, sibling_meshes, own_area_id,
+        )
+        if new_to < 0 or dist_to > PORTAL_REPAIR_MAX_DIST:
+            logger.warning(
+                f"Dropping portal '{portal_obj.name}': PositionTo is "
+                f"{dist_to:.2f}m away from the nearest polygon."
+            )
+            return None
+        poly_to = new_to
+
+    p = NavPortal()
+    p.type = int(props.portal_type)
+    p.angle = float(props.angle)
+    p.position_from = pos_from
+    p.position_to = pos_to
+    p.poly_from = poly_from & 0xFFFF
+    p.poly_to = poly_to & 0xFFFF
     return p
 
 
@@ -411,22 +431,67 @@ def navmesh_from_object(
     if portals_group is not None:
         for portal_obj in portals_group.children:
             if portal_obj.sollum_type == SollumType.NAVMESH_PORTAL:
-                nav.portals.append(_portal_from_obj(
+                portal_xml = _portal_from_obj(
                     portal_obj,
                     polymesh,
                     own_area,
                     sibling_meshes,
                     props.auto_recompute_edges,
-                ))
+                )
+                if portal_xml is not None:
+                    nav.portals.append(portal_xml)
 
     points_group = _find_group_with_children_of_type(navmesh_obj, SollumType.NAVMESH_POINT)
     if points_group is not None:
-        for point_obj in points_group.children:
-            if point_obj.sollum_type == SollumType.NAVMESH_POINT:
-                nav.points.append(_point_from_obj(point_obj))
+        # For each point we need to know: is there a walkable polygon directly
+        # under it? "Under" means close in XY AND close in Z. The Z check is
+        # what catches sunk polygons — their XY centroid doesn't move when
+        # we sink, so an XY-only filter would still find them as a valid
+        # neighbour and the point would be kept (then the game spawns a ped
+        # there and it stands still because the real walkable surface is
+        # 100m below).
+        poly_centroids = [(p.center[0], p.center[1], p.center[2])
+                          for p in polymesh.data.polygons]
 
-    # Bounding box
-    if props.auto_bb and nav.polygons:
+        def _has_polygon_under(px: float, py: float, pz: float) -> bool:
+            for cx, cy, cz in poly_centroids:
+                dx = cx - px
+                dy = cy - py
+                if (dx * dx + dy * dy) > (NAVPOINT_KEEP_XY_DIST * NAVPOINT_KEEP_XY_DIST):
+                    continue
+                if abs(cz - pz) <= NAVPOINT_KEEP_Z_DIST:
+                    return True
+            return False
+
+        kept = dropped = 0
+        for point_obj in points_group.children:
+            if point_obj.sollum_type != SollumType.NAVMESH_POINT:
+                continue
+            if props.auto_recompute_edges and poly_centroids:
+                pos = point_obj.matrix_world.translation
+                if not _has_polygon_under(pos[0], pos[1], pos[2]):
+                    dropped += 1
+                    continue
+            nav.points.append(_point_from_obj(point_obj))
+            kept += 1
+        if dropped:
+            logger.info(
+                f"Dropped {dropped} orphan NavPoint(s) (no polygon within "
+                f"{NAVPOINT_KEEP_XY_DIST}m XY and {NAVPOINT_KEEP_Z_DIST}m Z) "
+                f"— kept {kept}."
+            )
+
+    # Bounding box.
+    # MAP navmeshes (area_id != STANDALONE) have BBMin/BBMax fixed to the
+    # 150x150m grid-cell bounds. The game uses these to look up which file
+    # to load per cell — if we shrink them after deleting interior polys,
+    # the navmesh ends up in the wrong cell and the game crashes. So for
+    # map navmeshes we ALWAYS keep the imported BB (only Z is updated to
+    # actual polygon range). Standalone navmeshes (vehicles, interiors)
+    # use the fitted bbox.
+    from .properties import STANDALONE_AREA_ID
+    is_standalone = int(props.area_id) == STANDALONE_AREA_ID
+    if is_standalone and props.auto_bb and nav.polygons:
         all_verts = [v for poly in nav.polygons for v in poly.vertices]
         bb_min = Vector((min(v[0] for v in all_verts),
                          min(v[1] for v in all_verts),
@@ -435,6 +500,13 @@ def navmesh_from_object(
                          max(v[1] for v in all_verts),
                          max(v[2] for v in all_verts)))
     else:
+        # Map navmesh: pin BBMin/BBMax to the imported values verbatim. We
+        # USED to refit Z to actual polygon span, but that breaks the moment
+        # the user sinks polygons (sunk verts at Z=-100m push BBMin.z to
+        # -100m and the game crashes — it expects BB to roughly match the
+        # original cell-volume the engine was loaded with). Sunk polys live
+        # outside the BB, which is fine: they exist in the file for index
+        # consistency but the broad-phase never picks them.
         bb_min = Vector(props.bb_min)
         bb_max = Vector(props.bb_max)
     nav.bb_min = bb_min

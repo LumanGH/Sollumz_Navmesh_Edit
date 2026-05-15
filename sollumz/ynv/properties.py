@@ -53,12 +53,14 @@ class SzNavMeshProperties(PropertyGroup):
         default=True,
     )
     auto_recompute_small_large: BoolProperty(
-        name="Auto Recompute Small/Large",
+        name="(deprecated) Recompute Small/Large",
         description=(
-            "On export, reset the IsSmall/IsLarge bits of every polygon from "
-            "its area (area < 2 → small, > 40 → large)"
+            "No-op. The bits we used to write here turned out to be CodeWalker's "
+            "AvoidUnk0/AvoidUnk1, not computed Small/Large markers — touching "
+            "them on export would corrupt user-set avoidance data. Left here "
+            "for prefs compatibility; will be removed in a future version"
         ),
-        default=True,
+        default=False,
     )
     auto_recompute_edges: BoolProperty(
         name="Auto Recompute Edge Adjacency",

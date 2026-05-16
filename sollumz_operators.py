@@ -408,7 +408,7 @@ class SOLLUMZ_OT_export_assets_legacy(TimedOperator, Operator):
     bl_label = "Export CodeWalker XML"
 
     filter_glob: bpy.props.StringProperty(
-        default=f"*{YDR.file_extension};*{YDD.file_extension};*{YFT.file_extension};*{YBN.file_extension};*{YCD.file_extension};*{YMAP.file_extension};*{YNV.file_extension};",
+        default=f"*{YDR.file_extension};*{YDD.file_extension};*{YFT.file_extension};*{YBN.file_extension};*{YCD.file_extension};*{YMAP.file_extension};",
         options={"HIDDEN", "SKIP_SAVE"},
         maxlen=255,
     )

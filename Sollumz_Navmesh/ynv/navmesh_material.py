@@ -141,6 +141,21 @@ def material_category(mat: Material | None) -> str | None:
     return suffix if suffix in ALL_CATEGORIES else None
 
 
+def draw_material_info(layout, mat: Material) -> None:
+    """Inline navmesh material info — category + how-to-select hint.
+
+    Drawn directly inside the Sollumz material panel; not its own sub-panel.
+    """
+    cat = material_category(mat)
+    if cat is not None:
+        layout.label(text=f"Category: {CATEGORY_LABELS[cat]}", icon="MATERIAL")
+    info = layout.column(align=True)
+    info.scale_y = 0.85
+    info.label(text="Edit Mode → 'Select' above picks every", icon="INFO")
+    info.label(text="polygon using this material. Flags are")
+    info.label(text="edited in the N-panel (Sollumz Tools).")
+
+
 def reassign_materials(mesh: Mesh) -> None:
     """Walk every face and re-route it to the material matching its current flags.
 

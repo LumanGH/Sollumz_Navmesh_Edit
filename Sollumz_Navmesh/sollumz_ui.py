@@ -577,6 +577,15 @@ class SOLLUMZ_PT_MAT_PANEL(bpy.types.Panel):
         aobj = context.active_object
         mat = aobj.active_material
 
+        # NavMesh materials have sollum_type == NONE but are not "unset" — we
+        # draw their info inline here and skip the generic shader-material
+        # picker (the picker is irrelevant for navmesh).
+        from .ynv.navmesh_material import MATERIAL_NAME_PREFIX as _NAV_MAT_PREFIX
+        if mat is not None and mat.name.startswith(_NAV_MAT_PREFIX):
+            from .ynv.navmesh_material import draw_material_info
+            draw_material_info(layout, mat)
+            return
+
         if not mat or mat.sollum_type == MaterialType.NONE:
             layout.label(text="Material is not a Sollumz material.", icon="ERROR")
 

@@ -5,9 +5,9 @@
   is meaningful); disabled with a hint in Object Mode.
 * **N-panel "NavMesh"** — root metadata + export button (shown for the
   NAVMESH parent object).
-* **Material Properties → "NavMesh Category"** — read-only blurb that
-  tells the user which category the current material represents; nothing
-  to edit there.
+
+Navmesh material info is drawn inline inside the Sollumz material panel
+(see ``sollumz_ui.SOLLUMZ_PT_MAT_PANEL``), not as its own sub-panel.
 """
 import bpy
 from bpy.types import Panel
@@ -20,15 +20,6 @@ from .navmesh_attributes import (
     FLAG3_BITS,
     NavMeshAttr,
 )
-from .navmesh_material import (
-    CATEGORY_LABELS,
-    MATERIAL_NAME_PREFIX,
-    material_category,
-)
-
-
-def _is_navmesh_material(mat) -> bool:
-    return mat is not None and mat.name.startswith(MATERIAL_NAME_PREFIX)
 
 
 def _active_navmesh_polymesh(context):
@@ -47,45 +38,49 @@ def _bm_selected_count(mesh):
     return sum(1 for f in bm.faces if f.select), bm
 
 
-def _draw_flag_group(layout, mesh, bm, sel_count, label, attr, bits, enabled: bool):
-    box = layout.box()
-    box.label(text=label)
-    body = box.column(align=True)
-    body.enabled = enabled
+def _draw_flag_group(layout, context, attr, bits):
+    """2-column checkbox grid for one flag byte + a 'select matching' button."""
+    obj = _active_navmesh_polymesh(context)
+    if obj is None:
+        return
+    mesh = obj.data
+    enabled = mesh.is_editmode
+    sel_count, bm = _bm_selected_count(mesh) if enabled else (0, None)
 
     layer = None
     if bm is not None:
         try:
             layer = bm.faces.layers.int[attr.value]
         except KeyError:
-            body.label(text="(attribute missing)", icon="ERROR")
+            layout.label(text="(attribute missing)", icon="ERROR")
             return
+
+    grid = layout.grid_flow(columns=2, even_columns=True, align=True)
+    grid.enabled = enabled and sel_count > 0
 
     for bit_idx, bit_label in bits:
         mask = 1 << bit_idx
-        if layer is not None:
+        if layer is not None and sel_count:
             count_on = sum(1 for f in bm.faces if f.select and f[layer] & mask)
-            display = (f"{bit_label}  ({count_on}/{sel_count})"
-                       if sel_count else bit_label)
+            all_on = count_on == sel_count
         else:
-            display = bit_label
-        row = body.row(align=True)
-        row.label(text=display)
-        sub = row.row(align=True)
-        sub.enabled = enabled and sel_count > 0
-        op_on = sub.operator("sollumz.navmesh_set_poly_flag_bit", text="On")
-        op_on.attr_name = attr.value
-        op_on.mask = mask
-        op_on.value = True
-        op_off = sub.operator("sollumz.navmesh_set_poly_flag_bit", text="Off")
-        op_off.attr_name = attr.value
-        op_off.mask = mask
-        op_off.value = False
-        op_sel = row.operator("sollumz.navmesh_select_polys_by_flag",
-                              text="", icon="RESTRICT_SELECT_OFF")
-        op_sel.attr_name = attr.value
-        op_sel.mask = mask
-        op_sel.extend = False
+            all_on = False
+        op = grid.operator("sollumz.navmesh_set_poly_flag_bit",
+                           text=bit_label,
+                           icon="CHECKBOX_HLT" if all_on else "CHECKBOX_DEHLT",
+                           depress=all_on)
+        op.attr_name = attr.value
+        op.mask = mask
+        op.value = not all_on  # click toggles: all-on -> off, otherwise -> on
+
+    # Select every polygon whose flag byte matches the active poly's byte.
+    # Shift-click extends instead of replacing the selection.
+    select_row = layout.row()
+    select_row.enabled = enabled and sel_count > 0
+    op_sel = select_row.operator("sollumz.navmesh_select_polys_by_flag_byte",
+                                 text="Select Matching Polygons",
+                                 icon="RESTRICT_SELECT_OFF")
+    op_sel.attr_name = attr.value
 
 
 class SOLLUMZ_PT_navmesh_poly_flags(Panel):
@@ -100,6 +95,9 @@ class SOLLUMZ_PT_navmesh_poly_flags(Panel):
     def poll(cls, context):
         return _active_navmesh_polymesh(context) is not None
 
+    def draw_header(self, context):
+        self.layout.label(text="", icon="CON_FOLLOWPATH")
+
     def draw(self, context):
         layout = self.layout
         obj = _active_navmesh_polymesh(context)
@@ -109,37 +107,61 @@ class SOLLUMZ_PT_navmesh_poly_flags(Panel):
             warn = layout.column(align=True)
             warn.label(text="Enter Edit Mode to edit polygon flags.", icon="INFO")
             warn.label(text="(polygon selection isn't available in Object Mode.)")
-            sel_count, bm = 0, None
         else:
-            sel_count, bm = _bm_selected_count(mesh)
+            sel_count, _ = _bm_selected_count(mesh)
             layout.label(text=(f"{sel_count} polygon(s) selected"
                                if sel_count else "Select polygon(s) to edit"),
                          icon="FACESEL")
 
-        enabled = mesh.is_editmode
 
-        # "Disable" workflow — front and centre because plain Delete is the
-        # main cause of in-game crashes. Sink is the safe replacement.
-        layout.separator()
-        sink_box = layout.box()
-        sink_box.label(text="Disable Polygons", icon="ERROR")
-        warn = sink_box.column(align=True)
-        warn.scale_y = 0.85
-        warn.label(text="DON'T use Delete — it shifts indices and")
-        warn.label(text="crashes the game. Use Sink instead:")
-        sink_row = sink_box.row()
-        sink_row.enabled = enabled and sel_count > 0
-        sink_row.operator("sollumz.navmesh_sink_polys",
-                          text="Sink Selected (-100m Z)", icon="TRIA_DOWN_BAR")
+class SOLLUMZ_PT_navmesh_poly_flag_0(Panel):
+    bl_label = "Flag 0"
+    bl_idname = "SOLLUMZ_PT_navmesh_poly_flag_0"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Sollumz Tools"
+    bl_parent_id = "SOLLUMZ_PT_navmesh_poly_flags"
 
-        layout.separator()
-        for label, attr, bits in (
-            ("Flag 0", NavMeshAttr.POLY_FLAG_0, FLAG0_BITS),
-            ("Flag 1", NavMeshAttr.POLY_FLAG_1, FLAG1_BITS),
-            ("Flag 2 (Category)", NavMeshAttr.POLY_FLAG_2, FLAG2_BITS),
-            ("Flag 3 (Slope)", NavMeshAttr.POLY_FLAG_3, FLAG3_BITS),
-        ):
-            _draw_flag_group(layout, mesh, bm, sel_count, label, attr, bits, enabled)
+    def draw(self, context):
+        _draw_flag_group(self.layout, context, NavMeshAttr.POLY_FLAG_0, FLAG0_BITS)
+
+
+class SOLLUMZ_PT_navmesh_poly_flag_1(Panel):
+    bl_label = "Flag 1"
+    bl_idname = "SOLLUMZ_PT_navmesh_poly_flag_1"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Sollumz Tools"
+    bl_parent_id = "SOLLUMZ_PT_navmesh_poly_flags"
+
+    def draw(self, context):
+        _draw_flag_group(self.layout, context, NavMeshAttr.POLY_FLAG_1, FLAG1_BITS)
+
+
+class SOLLUMZ_PT_navmesh_poly_flag_2(Panel):
+    bl_label = "Flag 2 (Category)"
+    bl_idname = "SOLLUMZ_PT_navmesh_poly_flag_2"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Sollumz Tools"
+    bl_parent_id = "SOLLUMZ_PT_navmesh_poly_flags"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        _draw_flag_group(self.layout, context, NavMeshAttr.POLY_FLAG_2, FLAG2_BITS)
+
+
+class SOLLUMZ_PT_navmesh_poly_flag_3(Panel):
+    bl_label = "Flag 3 (Slope)"
+    bl_idname = "SOLLUMZ_PT_navmesh_poly_flag_3"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Sollumz Tools"
+    bl_parent_id = "SOLLUMZ_PT_navmesh_poly_flags"
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        _draw_flag_group(self.layout, context, NavMeshAttr.POLY_FLAG_3, FLAG3_BITS)
 
 
 class SOLLUMZ_PT_navmesh_root(Panel):
@@ -190,30 +212,6 @@ class SOLLUMZ_PT_navmesh_root(Panel):
             warn.label(text="multi-cell export keeps neighbours")
             warn.label(text="from crashing the game.")
         box.operator("sollumz.export_all_navmeshes", icon="EXPORT")
-
-
-class SOLLUMZ_PT_navmesh_material_category(Panel):
-    """Material Properties: read-only category info for the active material."""
-    bl_label = "NavMesh Category"
-    bl_idname = "SOLLUMZ_PT_navmesh_material_category"
-    bl_space_type = "PROPERTIES"
-    bl_region_type = "WINDOW"
-    bl_context = "material"
-
-    @classmethod
-    def poll(cls, context):
-        return _is_navmesh_material(getattr(context, "material", None))
-
-    def draw(self, context):
-        layout = self.layout
-        cat = material_category(context.material)
-        if cat is not None:
-            layout.label(text=f"Category: {CATEGORY_LABELS[cat]}", icon="MATERIAL")
-        info = layout.column(align=True)
-        info.scale_y = 0.85
-        info.label(text="Edit Mode → 'Select' above picks every", icon="INFO")
-        info.label(text="polygon using this material. Flags are")
-        info.label(text="edited in the N-panel (Sollumz Tools).")
 
 
 class SOLLUMZ_PT_navmesh_portal(Panel):

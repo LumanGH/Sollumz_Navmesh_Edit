@@ -274,6 +274,11 @@ class SOLLUMZ_OT_navmesh_select_polys_by_flag(Operator):
     def poll(cls, context):
         return _navmesh_edit_poll(context)
 
+    def invoke(self, context, event):
+        # Shift-click extends the current selection instead of replacing it.
+        self.extend = event.shift
+        return self.execute(context)
+
     def execute(self, context):
         obj = context.active_object
         mesh = obj.data
@@ -296,6 +301,59 @@ class SOLLUMZ_OT_navmesh_select_polys_by_flag(Operator):
         bm.select_flush(True)
         bmesh.update_edit_mesh(mesh)
         self.report({"INFO"}, f"{matched} polygon(s) match the flag.")
+        return {"FINISHED"}
+
+
+class SOLLUMZ_OT_navmesh_select_polys_by_flag_byte(Operator):
+    """Select every polygon whose flag byte matches the active polygon's value.
+
+    "Select similar" for one flag byte — uses the active face's byte as the
+    reference; falls back to the first selected face if there's no active.
+    """
+    bl_idname = "sollumz.navmesh_select_polys_by_flag_byte"
+    bl_label = "Select Polys by Matching Flag Byte"
+    bl_options = {"REGISTER", "UNDO"}
+
+    attr_name: StringProperty()
+    extend: BoolProperty(default=False)
+
+    @classmethod
+    def poll(cls, context):
+        return _navmesh_edit_poll(context)
+
+    def invoke(self, context, event):
+        self.extend = event.shift
+        return self.execute(context)
+
+    def execute(self, context):
+        obj = context.active_object
+        mesh = obj.data
+        bm = bmesh.from_edit_mesh(mesh)
+        try:
+            layer = bm.faces.layers.int[self.attr_name]
+        except KeyError:
+            self.report({"ERROR"}, f"Attribute '{self.attr_name}' not found on mesh.")
+            return {"CANCELLED"}
+
+        ref = bm.faces.active if (bm.faces.active and bm.faces.active.select) else None
+        if ref is None:
+            ref = next((f for f in bm.faces if f.select), None)
+        if ref is None:
+            self.report({"ERROR"}, "Select a polygon first — its flag byte is the match target.")
+            return {"CANCELLED"}
+
+        target = ref[layer] & 0xFF
+        if not self.extend:
+            for f in bm.faces:
+                f.select_set(False)
+        matched = 0
+        for f in bm.faces:
+            if (f[layer] & 0xFF) == target:
+                f.select_set(True)
+                matched += 1
+        bm.select_flush(True)
+        bmesh.update_edit_mesh(mesh)
+        self.report({"INFO"}, f"{matched} polygon(s) match flag byte 0x{target:02X}.")
         return {"FINISHED"}
 
 

@@ -2,5 +2,7 @@
 
 A modified Sollumz for editing GTA V navmeshes (`.ynv.xml`) inside Blender.
 
+Video Tutorial - https://youtu.be/BGquctFhXPc
+
 
 ⭐ A star on the repo also helps other modders find the tool.

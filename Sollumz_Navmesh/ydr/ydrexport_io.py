@@ -1,11 +1,9 @@
-import bmesh
 import bpy
 from bpy.types import (
     Object,
     Material,
     Mesh,
     Bone,
-    VertexGroup,
     Armature,
     PoseBone,
     ShaderNodeTexImage,
@@ -24,9 +22,9 @@ from ..lods import operates_on_lod_level
 
 from szio.types import DataSource
 from szio.gta5 import (
-    create_asset_drawable,
     AssetBound,
     AssetDrawable,
+    AssetFragDrawable,
     LodLevel as IOLodLevel,
     EmbeddedTexture,
     ShaderGroup,
@@ -90,14 +88,14 @@ def export_ydr(obj: Object) -> ExportBundle:
 
 def create_drawable_asset(
     drawable_obj: Object,
-    armature_obj: Optional[Object] = None,
-    materials: Optional[list[Material]] = None,
+    armature_obj: Object | None = None,
+    materials: list[Material] | None = None,
     is_frag: bool = False,
-    parent_drawable: Optional[AssetDrawable] = None,
+    parent_drawable: AssetDrawable | None = None,
     out_embedded_textures: list[EmbeddedTexture] | None = None,
     hi: bool = False,
     char_cloth: CharacterCloth | None = None,
-) -> Optional[AssetDrawable]:
+) -> AssetDrawable | None:
     """Create a ``Drawable`` cwxml object. Optionally specify an external ``armature_obj`` if ``drawable_obj`` is not an armature."""
 
     materials = materials or get_sollumz_materials(drawable_obj)
@@ -115,7 +113,7 @@ def create_drawable_asset(
         if out_embedded_textures is not None:
             out_embedded_textures.extend(shader_group.embedded_textures.values())
 
-    drawable = create_asset_drawable(export_context().settings.targets, is_frag, parent_drawable)
+    drawable = AssetFragDrawable() if is_frag else AssetDrawable()
     drawable.name = remove_number_suffix(drawable_obj.name.lower())
     drawable.lod_thresholds = {
         IOLodLevel.HIGH: drawable_obj.drawable_properties.lod_dist_high,
@@ -692,6 +690,7 @@ def create_shader_parameters_list_template(shader_def: Optional[ShaderDef]) -> l
 
 
 def get_embedded_textures_from_materials(materials: list[Material]) -> dict[str, EmbeddedTexture]:
+    from ..ytd.ytdexport import extract_texture_dds_data_source
     textures = {}
 
     for node in get_embedded_texture_nodes_from_materials(materials):
@@ -700,37 +699,10 @@ def get_embedded_textures_from_materials(materials: list[Material]) -> dict[str,
         if texture_name in textures or not texture_name:
             continue
 
-        texture_name_dds = f"{texture_name}.dds"
-        texture_data = None
         img = node.image
-        packed = img.packed_file
-        if packed and (packed_data := packed.data):
-            # Embed packed data
-            if not packed_data.startswith(b"DDS "):
-                logger.warning(
-                    f"Embedded texture '{img.name}' packed data is not in DDS format. Please, convert it to a DDS file."
-                )
-            else:
-                texture_data = DataSource.create(packed_data, texture_name_dds)
-        else:
-            # Embed external file
-            texture_path = Path(bpy.path.abspath(img.filepath))
-            if not texture_path.is_file():
-                logger.warning(
-                    f"Embedded texture '{img.name}' file does not exist and the image is not packed. "
-                    f"File path: {texture_path}"
-                )
-            elif texture_path.suffix != ".dds":
-                logger.warning(
-                    f"Embedded texture '{img.name}' is not in DDS format. Please, convert it to a DDS file."
-                    f"File path: {texture_path}"
-                )
-            else:
-                texture_data = DataSource.create(texture_path, texture_name_dds)
-
+        texture_data = extract_texture_dds_data_source(img, texture_name)
         w, h = img.size
-        texture = EmbeddedTexture(texture_name, w, h, texture_data)
-        textures[texture_name] = texture
+        textures[texture_name] = EmbeddedTexture(texture_name, w, h, texture_data)
 
     return textures
 

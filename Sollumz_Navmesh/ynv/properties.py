@@ -1,8 +1,3 @@
-"""PropertyGroups for YNV.
-
-Flags themselves live on mesh attributes (see ``navmesh_attributes``) — the
-material is only a visual grouping, so it has no property group of its own.
-"""
 import bpy
 from bpy.props import (
     FloatProperty,
@@ -14,13 +9,11 @@ from bpy.props import (
 from bpy.types import Object, PropertyGroup
 
 
-# Standalone navmesh (vehicle / interior nav) uses this magic area_id.
+# Magic area_id for standalone navmeshes (vehicles, interiors).
 STANDALONE_AREA_ID = 10000
 
 
 class SzNavMeshProperties(PropertyGroup):
-    """Root navmesh metadata. Stored on the NAVMESH parent object."""
-
     area_id: IntProperty(
         name="Area ID",
         description="Grid cell index for map navmeshes, or 10000 for standalone",

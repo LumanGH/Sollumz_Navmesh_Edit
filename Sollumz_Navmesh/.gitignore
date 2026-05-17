@@ -1,0 +1,16 @@
+__pycache__
+*.pyc
+.cache
+tmp
+.vscode
+.venv
+load_submodules
+vsdevelopment.code-workspace
+.idea
+test_performance.py
+*.prof
+RELEASE_NOTES.md
+Sollumz.zip
+coverage.xml
+.coverage
+offline_index/

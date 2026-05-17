@@ -1,11 +1,3 @@
-"""Per-polygon and per-edge mesh attributes — the single source of truth for
-every flag byte.
-
-The polygon's material is just a visual grouping (one material per category)
-that lets the user select all polygons of a given kind via the standard
-"Select by Material" workflow. The exporter never reads flags off a material
-— it always reads them from these attributes.
-"""
 from enum import Enum
 
 from bpy.types import Mesh
@@ -28,11 +20,10 @@ class NavMeshAttr(str, Enum):
         return "EDGE" if self.name.startswith("EDGE") else "FACE"
 
 
-# A 14-bit value of all 1s means "no neighbour" in the CodeWalker format.
+# 14-bit all-ones — CodeWalker's "no neighbour" sentinel.
 ADJACENT_NONE = 16383
 
 
-# Named (bit_index, label) pairs for each flag byte — used by the UI.
 FLAG0_BITS: list[tuple[int, str]] = [
     (0, "Avoid Unk0"),
     (1, "Avoid Unk1"),
@@ -83,7 +74,6 @@ def has_navmesh_attributes(mesh: Mesh) -> bool:
 
 
 def parse_flags_str(flags_str: str) -> tuple[int, int, int, int, int, int, int, bool]:
-    """Parse ``<Flags>`` text into (f0, f1, f2, f3, cx, cy, f4, had_f4)."""
     nums = [int(p) for p in (flags_str or "").split() if p]
     had_f4 = len(nums) >= 7
     while len(nums) < 7:

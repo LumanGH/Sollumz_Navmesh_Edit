@@ -1,21 +1,3 @@
-"""Local CWXML wrapper for GTA V .ynv navmesh.
-
-The stock ``szio.gta5.cwxml.navmesh`` can't write a navmesh back:
-  1. NavPolygonVertices doesn't override ``to_xml()`` so the default list
-     serializer tries to call ``Vector.to_xml()`` and crashes.
-  2. NavPortal.type uses the ``Value`` tag but CodeWalker writes ``Type``.
-
-Both are fixed here. We also override ``write_xml`` and provide a custom
-VectorProperty so a plain import → export round-trips the file
-byte-identically against the original CodeWalker output:
-
-* 1-space indent per level (szio defaults to 2)
-* XML declaration with double quotes (Python's ElementTree defaults to single)
-* BB attributes formatted without trailing ``.0`` for whole numbers
-
-Without these, the data is correct but the textual form drifts on every
-re-export — git diff churn and broken file-comparison testing.
-"""
 from xml.etree import ElementTree as ET
 
 import numpy as np
@@ -31,21 +13,8 @@ from szio.xml import (
 
 
 def fmt_float(v) -> str:
-    """Format a float32 coordinate the way CodeWalker does.
-
-    CodeWalker runs on .NET Framework, which serializes ``Single`` values
-    through ``ToString("R")`` — round-trip format. That implementation
-    tries 7 significant digits first; if the result round-trips back to
-    the original ``Single``, it's used. Otherwise it falls back to 9.
-    Never 8 — .NET goes straight from 7 to 9.
-
-    Outputs match the source files byte-for-byte:
-      * ``152.9984``  (G7 round-trips; G9 would add noise: 152.998398)
-      * ``-750.0023`` (G7)
-      * ``241.155212`` (G7 truncates to 241.1552 — fall back to G9)
-      * ``4.41054964`` (G9)
-      * ``150``       (integer-valued, no fractional part)
-    """
+    # Mimics .NET ToString("R"): G7 if it round-trips, otherwise G9.
+    # Required for byte-identical round-trips against CodeWalker output.
     f32 = np.float32(float(v))
     f = float(f32)
     if f == int(f):
@@ -57,8 +26,6 @@ def fmt_float(v) -> str:
 
 
 class NavmeshVectorProperty(VectorProperty):
-    """VectorProperty that emits ``x="150"`` instead of ``x="150.0"`` for whole numbers."""
-
     def to_xml(self):
         return ET.Element(self.tag_name, attrib={
             "x": fmt_float(self.value.x),
@@ -68,13 +35,8 @@ class NavmeshVectorProperty(VectorProperty):
 
 
 class NavmeshFloatValueProperty(ValueProperty):
-    """ValueProperty for float fields (Angle), formatted via :func:`fmt_float`.
-
-    Stock ``ValueProperty.to_xml`` does ``str(float32(value))``, which always
-    emits 7 significant digits — even when CodeWalker stored 9. Round-trip
-    output then drifts on every save.
-    """
-
+    # Stock ValueProperty always emits G7; CodeWalker can store G9.
+    # Use fmt_float to keep round-trips stable.
     def to_xml(self):
         value = self.value
         if isinstance(value, float):
@@ -162,7 +124,7 @@ class NavPolygonList(ListProperty):
 
 
 def _indent_one_space(elem: ET.Element, level: int = 0) -> None:
-    """Copy of szio's ``indent`` but with a single-space step (matches CodeWalker)."""
+    # szio's indent helper but with a single-space step to match CodeWalker.
     amount = " "
     i = "\n" + level * amount
     if len(elem):
@@ -177,7 +139,6 @@ def _indent_one_space(elem: ET.Element, level: int = 0) -> None:
     else:
         if level and (not elem.tail or not elem.tail.strip()):
             elem.tail = i
-        # Multi-line text (Vertices, Edges) — indent each line under its parent.
         if elem.text and len(elem.text.strip()) > 0 and elem.text.find("\n") != -1:
             lines = elem.text.strip().split("\n")
             for idx, line in enumerate(lines):
@@ -200,18 +161,11 @@ class Navmesh(ElementTree):
         self.points = NavPointList()
 
     def write_xml(self, filepath):
-        """Serialize with CodeWalker-style indent + XML declaration.
-
-        Hand-writing the header avoids two ElementTree defaults we can't
-        configure: single-quoted XML declaration and zero-space before the
-        self-closing slash. CodeWalker uses double-quoted declaration and
-        ``<Tag attr="..." />`` with a leading space.
-        """
+        # Hand-writing the header so we get a double-quoted XML declaration
+        # and `" />` self-closing tags — both required by CodeWalker.
         element = self.to_xml()
         _indent_one_space(element)
         body = ET.tostring(element, encoding="unicode", short_empty_elements=True)
-        # CodeWalker emits self-closing tags with a leading space (`" />`).
-        # ElementTree emits no space (`"/>`). Normalize.
         body = body.replace('"/>', '" />')
         if not body.endswith("\n"):
             body += "\n"

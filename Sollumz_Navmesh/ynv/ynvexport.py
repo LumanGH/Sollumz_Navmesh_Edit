@@ -1,29 +1,3 @@
-"""Export a NAVMESH hierarchy to a CodeWalker .ynv.xml file.
-
-Vertices are shared between polygons after import (welded by position),
-so Blender's edge-to-face map finds the neighbour for every internal
-edge — the 3ds Max ofio plugin's ``reverse_edge_poly`` trick.
-
-Boundary edges (no neighbour inside the current mesh) fall into one of
-three buckets:
-
-1. **The neighbour cell is loaded in the scene** (multi-cell export).
-   Look the edge up by its two vertex positions in the sibling's
-   boundary-edge index — if a match exists, emit
-   ``(sibling_area_id, sibling_poly_idx)`` with the *current* polygon
-   index. Otherwise the sibling polygon was deleted → emit
-   ``ADJACENT_NONE``.
-
-2. **The neighbour cell is NOT loaded.** Keep whatever the EDGE
-   attribute stored at import — we have no way to know if the index in
-   that file is still valid, so trust it verbatim.
-
-3. **The stored attribute points back at OUR own area_id** (the
-   neighbour was once inside this same mesh and got deleted since
-   import — the topology recompute above already found no face on the
-   other side). Emit ``ADJACENT_NONE``; writing the stale index would
-   crash the game.
-"""
 from typing import Optional
 
 from mathutils import Vector
@@ -46,10 +20,7 @@ from .navmesh_attributes import (
 )
 
 
-# Boundary edges are matched across cells by rounding vertex coordinates
-# to this many decimal places before comparing. 3 decimals = 1mm; well
-# below CodeWalker's own coordinate precision so two cells that share a
-# physical edge end up with the same key.
+# Decimal places kept when matching boundary edges across cells.
 _EDGE_POS_EPS = 3
 
 
@@ -75,13 +46,9 @@ def _round_pos(v) -> tuple:
 
 
 def build_edge_positional_index(mesh) -> dict[tuple, int]:
-    """Index every **boundary** edge by its rounded XYZ-pair → polygon index.
-
-    Internal edges (shared by two faces of this mesh) are skipped because
-    a cross-cell neighbour can only touch one of our faces by definition.
-    Skipping them also rules out false matches where an internal edge of
-    a sibling happens to coincide in space with our boundary edge.
-    """
+    # Index each boundary edge by rounded vertex positions so sibling cells
+    # can resolve cross-cell neighbours by coordinate match. Internal edges
+    # are skipped — a real cross-cell neighbour only touches one of our faces.
     edge_users: dict[tuple[int, int], list[int]] = {}
     for face in mesh.polygons:
         n = len(face.vertices)
@@ -164,7 +131,6 @@ def _polygons_from_mesh(
             v1 = face.vertices[(i + 1) % n]
             key = (min(v0, v1), max(v0, v1))
 
-            # Internal edge inside this mesh.
             other = [f for f in edge_to_faces.get(key, ()) if f != face.index]
             if other:
                 edge_list.append((area_id & 0xFFFF, other[0] & 0xFFFF))
@@ -178,14 +144,12 @@ def _polygons_from_mesh(
             stored_area = area_data[edge_idx].value & 0xFFFF
             stored_poly = poly_data[edge_idx].value & 0xFFFF
 
-            # Stored neighbour was in OUR own area → it was internal and
-            # has been deleted since import. No safe value to write.
+            # Stale self-reference: the neighbour was inside this mesh and has
+            # been deleted; emitting the stored index would crash the game.
             if stored_area == area_id:
                 edge_list.append((ADJACENT_NONE, ADJACENT_NONE))
                 continue
 
-            # Sibling cell is loaded → trust positional matching for the
-            # current (possibly renumbered) polygon index.
             if (sibling_indices
                     and stored_area != ADJACENT_NONE
                     and stored_area in sibling_indices):
@@ -196,12 +160,9 @@ def _polygons_from_mesh(
                 if new_idx is not None:
                     edge_list.append((stored_area, new_idx & 0xFFFF))
                 else:
-                    # Sibling cell is loaded but its boundary edge is gone
-                    # — its polygon was deleted. Emit "no neighbour".
                     edge_list.append((ADJACENT_NONE, ADJACENT_NONE))
                 continue
 
-            # Sibling cell not loaded — keep stored value verbatim.
             edge_list.append((stored_area, stored_poly))
 
         poly_xml = NavPolygon()

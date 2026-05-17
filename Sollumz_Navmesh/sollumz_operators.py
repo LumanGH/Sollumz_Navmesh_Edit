@@ -13,6 +13,8 @@ from bpy.props import (
 )
 import time
 import re
+from pathlib import Path
+from typing import Literal
 from mathutils import Quaternion
 from .sollumz_helper import SOLLUMZ_OT_base, find_sollumz_parent
 from .sollumz_properties import SollumType, SOLLUMZ_UI_NAMES, TimeFlagsMixin
@@ -178,8 +180,8 @@ class ImportAssetsOperatorImpl(ImportSettingsBase, TimedOperator):
 
     filter_glob: bpy.props.StringProperty(
         default="".join(f"*{ext};" for ext in (
-            ".ybn", ".ydr", ".ydd", ".yft", ".ytyp",
-            ".ybn.xml", ".ydr.xml", ".ydd.xml", ".yft.xml", ".ytyp.xml", ".ymap.xml", ".ycd.xml", ".ynv.xml"
+            ".ybn", ".ydr", ".ydd", ".yft", ".ytyp", ".ytd",
+            ".ybn.xml", ".ydr.xml", ".ydd.xml", ".yft.xml", ".ytyp.xml", ".ytd.xml", ".ymap.xml", ".ycd.xml", ".ynv.xml"
         )),
         options={"HIDDEN", "SKIP_SAVE"},
         maxlen=255,
@@ -205,6 +207,7 @@ class ImportAssetsOperatorImpl(ImportSettingsBase, TimedOperator):
             self.directory = bpy.path.abspath(self.directory)
 
             filenames = [f.name for f in self.files]
+            filenames, ytd_filenames = self._separate_ytd_filenames(filenames)
             filenames, ytyp_filenames = self._separate_ytyp_filenames(filenames)
             filenames = self._dedupe_hi_yft_filenames(filenames)
 
@@ -215,6 +218,7 @@ class ImportAssetsOperatorImpl(ImportSettingsBase, TimedOperator):
             from .ydd.yddimport_io import import_ydd as import_ydd_asset, find_ydd_external_dependencies
             from .yft.yftimport_io import import_yft as import_yft_asset, find_yft_external_dependencies
             from .ytyp.ytypimport_io import import_ytyp as import_ytyp_asset
+            from .ytd.ytdimport import import_ytd as import_ytd_asset
             from .iecontext import import_context_scope, ImportContext
 
             prefs_import_settings = self if self.use_custom_settings else get_import_settings()
@@ -247,13 +251,14 @@ class ImportAssetsOperatorImpl(ImportSettingsBase, TimedOperator):
                     if _import_asset_legacy(str(filepath)):
                         return True
 
-                    asset = try_load_asset(filepath)
-                    if asset is None:
-                        if not IS_SZIO_NATIVE_AVAILABLE and filepath.suffix in {".ybn", ".ydr", ".ydd", ".yft", ".ytyp"}:
+                    if (load_result := try_load_asset(filepath, return_target=True)) is None:
+                        if not IS_SZIO_NATIVE_AVAILABLE and filepath.suffix in {".ybn", ".ydr", ".ydd", ".yft", ".ytyp", ".ytd"}:
                             logger.warning(f"Could not import '{filepath}'. {PYMATERIA_REQUIRED_MSG}")
                         else:
                             logger.warning(f"Could not import '{filepath}'. Unsupported file format.")
                         return False
+
+                    asset, asset_target = load_result
 
                     name = filepath.name
                     i = name.find('.')
@@ -261,7 +266,7 @@ class ImportAssetsOperatorImpl(ImportSettingsBase, TimedOperator):
                         name = name[:i]
 
                     # Search asset external dependencies
-                    with import_context_scope(ImportContext(name, directory, import_settings)):
+                    with import_context_scope(ImportContext(name, asset_target, directory, import_settings)):
                         match asset.ASSET_TYPE:
                             case AssetType.DRAWABLE_DICTIONARY:
                                 asset_with_deps = find_ydd_external_dependencies(asset, name)
@@ -281,7 +286,7 @@ class ImportAssetsOperatorImpl(ImportSettingsBase, TimedOperator):
                         return False
 
                     # Import asset into Blender
-                    with import_context_scope(ImportContext(name, directory, import_settings)):
+                    with import_context_scope(ImportContext(name, asset_target, directory, import_settings)):
                         match asset.ASSET_TYPE:
                             case AssetType.BOUND:
                                 import_ybn_asset(asset, name)
@@ -293,6 +298,8 @@ class ImportAssetsOperatorImpl(ImportSettingsBase, TimedOperator):
                                 import_yft_asset(asset_with_deps, name)
                             case AssetType.MAP_TYPES:
                                 import_ytyp_asset(asset, name)
+                            case AssetType.TEXTURE_DICTIONARY:
+                                import_ytd_asset(asset, name)
                             case _:
                                 assert False, f"Unsupported asset type '{asset.ASSET_TYPE}'"
 
@@ -301,6 +308,10 @@ class ImportAssetsOperatorImpl(ImportSettingsBase, TimedOperator):
                 except:
                     logger.error(f"Error importing: {filepath} \n {traceback.format_exc()}")
                     return False
+
+            # Import the .ytds before all the assets to ensure that their images are used
+            for filename in ytd_filenames:
+                _import_asset(filename)
 
             for filename in filenames:
                 _import_asset(filename)
@@ -335,6 +346,14 @@ class ImportAssetsOperatorImpl(ImportSettingsBase, TimedOperator):
             )
         ]
 
+    def _separate_ytd_filenames(self, filenames: list[str]) -> tuple[list[str], list[str]]:
+        """Separate the filenames list into two lists, one with all the assets and another one only with .ytds."""
+        asset_filenames, ytd_filenames = [], []
+        for f in filenames:
+            dest = ytd_filenames if f.endswith(".ytd") or f.endswith(".ytd.xml") else asset_filenames
+            dest.append(f)
+        return asset_filenames, ytd_filenames
+
     def _separate_ytyp_filenames(self, filenames: list[str]) -> tuple[list[str], list[str]]:
         """Separate the filenames list into two lists, one with all the assets and another one only with .ytyps."""
         asset_filenames, ytyp_filenames = [], []
@@ -358,7 +377,7 @@ if bpy.app.version >= (4, 1, 0):
         bl_import_operator = SOLLUMZ_OT_import_assets.bl_idname
         # Supports handling multiple extensions, but doesn't support multi-dot extensions like .yft.xml. `.xml` should
         # be fine because the operator checks the extension, but it is a bit broad.
-        bl_file_extensions = ".ybn;.ydr;.ydd;.yft;.ytyp;.xml;"
+        bl_file_extensions = ".ybn;.ydr;.ydd;.yft;.ytyp;.ytd;.xml;"
 
         @classmethod
         def poll_drop(cls, context):
@@ -509,10 +528,11 @@ class SOLLUMZ_OT_export_assets_legacy(TimedOperator, Operator):
         return os.path.join(self.directory, name + extension)
 
 
-class SOLLUMZ_OT_export_assets(ExportSettingsBase, TimedOperator, Operator):
+class ExportAssetsOperatorImpl(ExportSettingsBase, TimedOperator):
     """Export RAGE asset files"""
-    bl_idname = "sollumz.export_assets"
-    bl_label = "Export RAGE Assets"
+
+    sz_export_types = {"OBJECT", "YTYP", "YTD"}
+    """Types of exports to handle in this operator."""
 
     directory: bpy.props.StringProperty(
         name="Output directory",
@@ -563,23 +583,38 @@ class SOLLUMZ_OT_export_assets(ExportSettingsBase, TimedOperator, Operator):
         with logger.use_operator_logger(self) as op_log:
             logger.info("Starting export...")
             prefs_export_settings = self if self.use_custom_settings else get_export_settings()
-            objs = _collect_objects_for_export(context, prefs_export_settings.limit_to_selected)
+            if "OBJECT" in self.sz_export_types:
+                objs = _collect_objects_for_export(context, prefs_export_settings.limit_to_selected)
+            else:
+                objs = []
+
+            if "YTYP" in self.sz_export_types:
+                export_ytyps = (
+                    # only consider prefs in the generic export operator, the concrete one for YTYPs always exports them
+                    (self.sz_export_types == {"YTYP"} or prefs_export_settings.export_ytyps) and
+                    context.scene.ytyps
+                )
+            else:
+                export_ytyps = False
+
+            if "YTD" in self.sz_export_types:
+                export_ytds = (
+                    # only consider prefs in the generic export operator, the concrete one for YTDs always exports them
+                    (self.sz_export_types == {"YTD"} or prefs_export_settings.export_ytds) and
+                    context.scene.sz_txds.texture_dictionaries
+                )
+            else:
+                export_ytds = False
 
             self.directory = bpy.path.abspath(self.directory)
 
-            if not objs:
+            if not objs and not export_ytyps and not export_ytds:
                 if prefs_export_settings.limit_to_selected:
                     logger.info("No Sollumz objects selected for export!")
                 else:
                     logger.info("No Sollumz objects in the scene to export!")
                 return {"CANCELLED"}
 
-            from pathlib import Path
-            from .ybn.ybnexport_io import export_ybn as export_ybn_asset
-            from .ydr.ydrexport_io import export_ydr as export_ydr_asset
-            from .ydd.yddexport_io import export_ydd as export_ydd_asset
-            from .yft.yftexport_io import export_yft as export_yft_asset
-            from .iecontext import export_context_scope, ExportContext
 
             export_settings = prefs_export_settings.to_export_context_settings()
             if not export_settings.targets:
@@ -591,67 +626,157 @@ class SOLLUMZ_OT_export_assets(ExportSettingsBase, TimedOperator, Operator):
                 )
 
             directory = Path(self.directory)
-
             any_warnings_or_errors = False
-            for obj in objs:
-                op_log.clear_log_counts()
-                try:
-                    asset_name = remove_number_suffix(obj.name.lower())
-                    export_bundle = None
-                    legacy_success = False
-                    with export_context_scope(ExportContext(asset_name, export_settings)):
-                        match obj.sollum_type:
-                            case SollumType.BOUND_COMPOSITE:
-                                export_bundle = export_ybn_asset(obj)
-                            case SollumType.DRAWABLE:
-                                export_bundle = export_ydr_asset(obj)
-                            case SollumType.DRAWABLE_DICTIONARY:
-                                export_bundle = export_ydd_asset(obj)
-                            case SollumType.FRAGMENT:
-                                export_bundle = export_yft_asset(obj)
 
-                            # These assets still need legacy export
-                            case SollumType.CLIP_DICTIONARY:
-                                filepath = SOLLUMZ_OT_export_assets_legacy.get_filepath(self, obj, YCD.file_extension)
-                                legacy_success = export_ycd(obj, filepath)
-                            case SollumType.YMAP:
-                                filepath = SOLLUMZ_OT_export_assets_legacy.get_filepath(self, obj, YMAP.file_extension)
-                                legacy_success = export_ymap(obj, filepath)
-                            case SollumType.NAVMESH:
-                                filepath = SOLLUMZ_OT_export_assets_legacy.get_filepath(self, obj, YNV.file_extension)
-                                legacy_success = export_ynv(obj, filepath)
+            if objs:
+                any_warnings_or_errors = self._export_objects(objs, directory, export_settings, op_log) or any_warnings_or_errors
 
-                            case _:
-                                assert False, f"Unsupported asset type '{obj.sollum_type}'"
+            if export_ytyps:
+                ytyps = self._collect_ytyps_for_export(context, prefs_export_settings.export_ytyps_include)
+                any_warnings_or_errors = self._export_ytyps(context, ytyps, directory, export_settings, op_log) or any_warnings_or_errors
 
-                    success = export_bundle or legacy_success
-
-                    if success:
-                        if export_bundle:
-                            export_bundle.save(directory)
-
-                        if op_log.has_warnings_or_errors:
-                            logger.info(
-                                f"Exported '{obj.name}' with WARNINGS or ERRORS! Please check the Info Log for details."
-                            )
-                            any_warnings_or_errors = True
-                        else:
-                            logger.info(f"Successfully exported '{obj.name}'")
-                    else:
-                        if op_log.has_warnings_or_errors:
-                            logger.info(
-                                f"Failed to export '{obj.name}', ERRORS found! Please check the Info Log for details."
-                            )
-                            any_warnings_or_errors = True
-                except:
-                    logger.error(f"Error exporting: {obj.name} \n {traceback.format_exc()}")
-                    any_warnings_or_errors = True
-                    return {"CANCELLED"}
+            if export_ytds:
+                ytds = self._collect_ytds_for_export(context, prefs_export_settings.export_ytds_include)
+                any_warnings_or_errors = self._export_ytds(context, ytds, directory, export_settings, op_log) or any_warnings_or_errors
 
             logger.info(f"Exported in {self.time_elapsed} seconds")
             if any_warnings_or_errors and bpy.ops.screen.info_log_show.poll():
                 bpy.ops.screen.info_log_show()
             return {"FINISHED"}
+
+    def _export_objects(self, objs: list[Object], directory: Path, export_settings, op_log) -> bool:
+        from .ybn.ybnexport_io import export_ybn as export_ybn_asset
+        from .ydr.ydrexport_io import export_ydr as export_ydr_asset
+        from .ydd.yddexport_io import export_ydd as export_ydd_asset
+        from .yft.yftexport_io import export_yft as export_yft_asset
+        from .iecontext import export_context_scope, ExportContext
+
+        any_warnings_or_errors = False
+
+        for obj in objs:
+            op_log.clear_log_counts()
+            try:
+                asset_name = remove_number_suffix(obj.name.lower())
+                export_bundle = None
+                legacy_success = False
+                with export_context_scope(ExportContext(asset_name, export_settings)):
+                    match obj.sollum_type:
+                        case SollumType.BOUND_COMPOSITE:
+                            export_bundle = export_ybn_asset(obj)
+                        case SollumType.DRAWABLE:
+                            export_bundle = export_ydr_asset(obj)
+                        case SollumType.DRAWABLE_DICTIONARY:
+                            export_bundle = export_ydd_asset(obj)
+                        case SollumType.FRAGMENT:
+                            export_bundle = export_yft_asset(obj)
+
+                        # These assets still need legacy export
+                        case SollumType.CLIP_DICTIONARY:
+                            filepath = SOLLUMZ_OT_export_assets_legacy.get_filepath(self, obj, YCD.file_extension)
+                            legacy_success = export_ycd(obj, filepath)
+                        case SollumType.YMAP:
+                            filepath = SOLLUMZ_OT_export_assets_legacy.get_filepath(self, obj, YMAP.file_extension)
+                            legacy_success = export_ymap(obj, filepath)
+                        case SollumType.NAVMESH:
+                            filepath = SOLLUMZ_OT_export_assets_legacy.get_filepath(self, obj, YNV.file_extension)
+                            legacy_success = export_ynv(obj, filepath)
+
+                        case _:
+                            assert False, f"Unsupported asset type '{obj.sollum_type}'"
+
+
+                any_warnings_or_errors = self._save_bundle(obj.name, export_bundle, directory, export_settings, op_log, legacy_success=legacy_success) or any_warnings_or_errors
+            except:
+                logger.error(f"Error exporting: {obj.name} \n {traceback.format_exc()}")
+                any_warnings_or_errors = True
+
+        return any_warnings_or_errors
+
+    def _collect_ytyps_for_export(self, context, include: Literal["ALL", "SELECTED"]) -> list[int]:
+        n = len(context.scene.ytyps)
+        if include == "SELECTED":
+            # no multiselection yet, can only select one
+            idx = context.scene.ytyp_index
+            return [idx] if 0 <= idx < n else []
+        else:
+            return list(range(n))
+
+    def _export_ytyps(self, context, ytyp_indices: list[int], directory: Path, export_settings, op_log) -> bool:
+        from .ytyp.ytypexport_io import export_ytyp as export_ytyp_asset
+        from .iecontext import export_context_scope, ExportContext
+
+        any_warnings_or_errors = False
+
+        for ytyp_index in ytyp_indices:
+            op_log.clear_log_counts()
+            ytyp_name = context.scene.ytyps[ytyp_index].name
+            try:
+                with export_context_scope(ExportContext(ytyp_name, export_settings)):
+                    export_bundle = export_ytyp_asset(context.scene, ytyp_index)
+
+                any_warnings_or_errors = self._save_bundle(ytyp_name, export_bundle, directory, export_settings, op_log) or any_warnings_or_errors
+            except Exception:
+                logger.error(f"Error exporting: {ytyp_name} \n {traceback.format_exc()}")
+                any_warnings_or_errors = True
+
+        return any_warnings_or_errors
+
+    def _collect_ytds_for_export(self, context, include: Literal["ALL", "SELECTED"]) -> list[int]:
+        txds = context.scene.sz_txds.texture_dictionaries
+        if include == "SELECTED":
+            return txds.selected_items_indices
+        else:
+            return list(range(len(txds)))
+
+    def _export_ytds(self, context, txd_indices: list[int], directory: Path, export_settings, op_log) -> bool:
+        from .ytd.ytdexport import export_ytd as export_ytd_asset
+        from .iecontext import export_context_scope, ExportContext
+
+        any_warnings_or_errors = False
+
+        for txd_index in txd_indices:
+            op_log.clear_log_counts()
+            txd = context.scene.sz_txds.texture_dictionaries[txd_index]
+            try:
+                asset_name = txd.name.lower()
+                with export_context_scope(ExportContext(asset_name, export_settings)):
+                    export_bundle = export_ytd_asset(txd)
+
+                any_warnings_or_errors = self._save_bundle(txd.name, export_bundle, directory, export_settings, op_log) or any_warnings_or_errors
+            except Exception:
+                logger.error(f"Error exporting: {txd.name} \n {traceback.format_exc()}")
+                any_warnings_or_errors = True
+
+        return any_warnings_or_errors
+
+    def _save_bundle(self, name: str, export_bundle, directory: Path, export_settings, op_log, legacy_success=False) -> bool:
+        any_warnings_or_errors = False
+        success = export_bundle or legacy_success
+        if success:
+            if export_bundle:
+                export_bundle.save(directory, export_settings.targets)
+
+            if op_log.has_warnings_or_errors:
+                logger.info(
+                    f"Exported '{name}' with WARNINGS or ERRORS! Please check the Info Log for details."
+                )
+                any_warnings_or_errors = True
+            else:
+                logger.info(f"Successfully exported '{name}'")
+        else:
+            if op_log.has_warnings_or_errors:
+                logger.info(
+                    f"Failed to export '{name}', ERRORS found! Please check the Info Log for details."
+                )
+                any_warnings_or_errors = True
+
+        return any_warnings_or_errors
+
+
+class SOLLUMZ_OT_export_assets(ExportAssetsOperatorImpl, Operator):
+    """Export RAGE asset files"""
+    bl_idname = "sollumz.export_assets"
+    bl_label = "Export RAGE Assets"
 
 
 if DEV_MODE:

@@ -1,20 +1,3 @@
-"""Import a CodeWalker .ynv.xml into a NAVMESH object hierarchy.
-
-Vertices are **welded by position** during import — same approach the 3ds
-Max ofio plugin takes. Two polygons that share an edge end up sharing the
-two vertices that span it, so Blender treats the navmesh as a single
-connected mesh: moving a vertex moves both adjacent polygons, edges
-between polygons live in the mesh's edge table, and export can rebuild
-adjacency from topology.
-
-Per-polygon data (f0..f4, centroid bytes) stays on the FACE domain. For
-EDGE-domain adjacency:
-  * Internal edges (shared by ≥ 2 faces) leave the attribute at
-    ADJACENT_NONE — the exporter ignores it and reads the neighbour off
-    the topology.
-  * Boundary edges (one face only) carry the (area, poly) the source file
-    recorded for that corner — that's a reference into a sibling cell.
-"""
 import os
 
 import bpy
@@ -33,10 +16,7 @@ from .navmesh_attributes import (
 from .navmesh_material import classify_polygon, get_navmesh_material
 
 
-# How many decimal places to round vertex coordinates to when looking for
-# duplicates. float32 carries ~7 significant decimal digits, so rounding
-# to 5 decimal places (≈ 10µm) is safe — two vertices that are physically
-# the same point in the source file end up with the same hash key.
+# Decimal places kept when welding vertices by position.
 _WELD_PRECISION = 5
 
 
@@ -45,9 +25,8 @@ def polygons_to_obj(name: str, polygons) -> bpy.types.Object:
     vert_index: dict[tuple[float, float, float], int] = {}
     faces: list[list[int]] = []
     face_mats = []
-    # (f0, f1, f2, f3, f4, cx, cy, had_f4) per face
-    face_perpoly = []
-    face_edges = []      # list of (area, poly) per face corner from the source file
+    face_perpoly = []  # (f0, f1, f2, f3, f4, cx, cy, had_f4) per face
+    face_edges = []    # source (area, poly) per face corner
     material_cache: dict = {}
 
     def _vertex_index(v) -> int:
@@ -70,9 +49,7 @@ def polygons_to_obj(name: str, polygons) -> bpy.types.Object:
 
         face_idx = [_vertex_index(v) for v in poly_verts]
 
-        # Blender refuses to create a face that re-uses a vertex (a "zero
-        # area" sliver after welding). Drop it — its existence in the
-        # source file was a duplicated vertex coincidence anyway.
+        # Skip degenerate faces produced by the position weld.
         if len(set(face_idx)) < len(face_idx):
             continue
 
@@ -113,12 +90,8 @@ def polygons_to_obj(name: str, polygons) -> bpy.types.Object:
         cy_data[i].value = cy
         has_f4[i].value = 1 if had_f4 else 0
 
-    # Map each Blender edge to the list of (face_idx, corner_idx) it serves.
-    # An edge with ≥ 2 entries is internal — its adjacency will be rebuilt
-    # at export from topology, so we leave the attribute at ADJACENT_NONE.
-    # An edge with exactly one entry is a boundary edge: the source file's
-    # corner edge value at that (face_idx, corner_idx) is the cross-cell
-    # neighbour to preserve.
+    # Only boundary edges (one face user) need to carry a cross-cell
+    # neighbour reference; internal adjacency is recomputed from topology.
     edge_users: dict[tuple[int, int], list[tuple[int, int]]] = {}
     for face_i, face_verts in enumerate(faces):
         n = len(face_verts)

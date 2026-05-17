@@ -1,9 +1,3 @@
-"""Operators for the navmesh module.
-
-The polygon-flag operators run in **Edit Mode** via bmesh — that's where
-face selection is meaningful. In Object Mode the N-panel disables the flag
-controls and instructs the user to enter Edit Mode.
-"""
 import os
 import traceback
 
@@ -29,7 +23,6 @@ def _find_navmesh_root(obj):
 
 
 class SOLLUMZ_OT_export_ynv(Operator):
-    """Export the selected NAVMESH to a CodeWalker .ynv.xml file."""
     bl_idname = "sollumz.export_ynv"
     bl_label = "Export NavMesh (.ynv.xml)"
     bl_options = {"REGISTER"}
@@ -91,18 +84,6 @@ def _scene_navmeshes(context) -> list:
 
 
 class SOLLUMZ_OT_export_all_navmeshes(Operator):
-    """Export every NAVMESH in the scene to one folder with cross-cell stitching.
-
-    For each polygon's boundary edge, the exporter looks up the matching
-    edge in every other loaded NAVMESH by vertex position. When a match
-    exists, the edge gets the sibling cell's *current* polygon index —
-    that's how cross-cell links survive polygon deletions / additions in
-    either cell.
-
-    Recommended workflow when removing polygons that touch a cell border:
-    load this cell + the 8 surrounding cells into the same scene before
-    editing, then use this operator to write all 9 files at once.
-    """
     bl_idname = "sollumz.export_all_navmeshes"
     bl_label = "Export All NavMeshes (Multi-Cell)"
     bl_options = {"REGISTER"}
@@ -129,8 +110,6 @@ class SOLLUMZ_OT_export_all_navmeshes(Operator):
             self.report({"ERROR"}, f"Not a directory: {directory}")
             return {"CANCELLED"}
 
-        # Build the positional index for each cell once — used as siblings
-        # for every other cell during export.
         all_indices: dict[int, dict] = {}
         polymesh_by_area: dict[int, object] = {}
         for nav_obj in navmeshes:
@@ -146,7 +125,6 @@ class SOLLUMZ_OT_export_all_navmeshes(Operator):
         with logger.use_operator_logger(self):
             for nav_obj in navmeshes:
                 own_area = int(nav_obj.sz_navmesh.area_id)
-                # Pass only the OTHER cells as siblings.
                 siblings = {a: idx for a, idx in all_indices.items() if a != own_area}
                 filename = nav_obj.name + YNV.file_extension
                 filepath = os.path.join(directory, filename)
@@ -188,7 +166,6 @@ def _navmesh_poly_obj_poll(context) -> bool:
 
 
 class SOLLUMZ_OT_navmesh_set_poly_flag_bit(Operator):
-    """Set or clear a single flag bit on every selected polygon (Edit Mode)."""
     bl_idname = "sollumz.navmesh_set_poly_flag_bit"
     bl_label = "Toggle Navmesh Polygon Flag Bit"
     bl_options = {"REGISTER", "UNDO"}
@@ -226,12 +203,10 @@ class SOLLUMZ_OT_navmesh_set_poly_flag_bit(Operator):
                     touched += 1
         bmesh.update_edit_mesh(mesh)
 
-        # Reassign materials when an f1/f2 toggle changes category. Material
-        # slots are stored on the Mesh, not the bmesh, but they need a
-        # bmesh-aware update: we flip the slot index per-face by hand here.
+        # f1/f2 bit toggles can change a polygon's category, so re-route slots.
         if self.attr_name in _CLASSIFICATION_AFFECTING_ATTRS:
             from .navmesh_material import classify_polygon, material_category
-            from .navmesh_material import _make_category_material  # noqa: F401  # imported in inner scope to avoid circular
+            from .navmesh_material import _make_category_material  # noqa: F401
             f1_layer = bm.faces.layers.int[NavMeshAttr.POLY_FLAG_1.value]
             f2_layer = bm.faces.layers.int[NavMeshAttr.POLY_FLAG_2.value]
             slot_by_category: dict[str, int] = {}
@@ -261,7 +236,6 @@ class SOLLUMZ_OT_navmesh_set_poly_flag_bit(Operator):
 
 
 class SOLLUMZ_OT_navmesh_select_polys_by_flag(Operator):
-    """Select every polygon whose given flag bit is on (Edit Mode)."""
     bl_idname = "sollumz.navmesh_select_polys_by_flag"
     bl_label = "Select Polys by Navmesh Flag"
     bl_options = {"REGISTER", "UNDO"}
@@ -275,7 +249,6 @@ class SOLLUMZ_OT_navmesh_select_polys_by_flag(Operator):
         return _navmesh_edit_poll(context)
 
     def invoke(self, context, event):
-        # Shift-click extends the current selection instead of replacing it.
         self.extend = event.shift
         return self.execute(context)
 
@@ -305,11 +278,6 @@ class SOLLUMZ_OT_navmesh_select_polys_by_flag(Operator):
 
 
 class SOLLUMZ_OT_navmesh_select_polys_by_flag_byte(Operator):
-    """Select every polygon whose flag byte matches the active polygon's value.
-
-    "Select similar" for one flag byte — uses the active face's byte as the
-    reference; falls back to the first selected face if there's no active.
-    """
     bl_idname = "sollumz.navmesh_select_polys_by_flag_byte"
     bl_label = "Select Polys by Matching Flag Byte"
     bl_options = {"REGISTER", "UNDO"}
@@ -358,22 +326,8 @@ class SOLLUMZ_OT_navmesh_select_polys_by_flag_byte(Operator):
 
 
 class SOLLUMZ_OT_navmesh_sink_polys(Operator):
-    """Push selected polygons down along -Z so the game treats them as gone.
-
-    Why this exists instead of plain delete: the game's path-finding and its
-    spawn spatial index reference polygons by **index**. Deleting a polygon
-    shifts every following index — every neighbour edge, portal, and any
-    other navmesh that points into this cell ends up referring to the wrong
-    polygon (or one beyond the new array) and the game crashes.
-
-    Sinking 100m straight down keeps the polygon in the file (so all indices
-    stay valid) but moves the geometry far below the surface so spawn lookups
-    and broad-phase walks can't find it. This is the same trick the 3ds Max
-    ofio plugin uses for "removing" navmesh polygons.
-
-    Only vertices used **exclusively** by selected polygons move; shared
-    vertices stay put so neighbouring polys aren't dragged along.
-    """
+    # Sinks polygons instead of deleting them; deleting would shift indices and
+    # break references from neighbour edges, portals and sibling cells.
     bl_idname = "sollumz.navmesh_sink_polys"
     bl_label = "Sink Selected Polygons (-100m Z)"
     bl_options = {"REGISTER", "UNDO"}
@@ -396,8 +350,8 @@ class SOLLUMZ_OT_navmesh_sink_polys(Operator):
             self.report({"WARNING"}, "Select polygons first.")
             return {"CANCELLED"}
 
-        # Per-vertex face users — only sink vertices that *exclusively* belong
-        # to selected faces; shared verts would tear neighbours along with them.
+        # Only sink vertices exclusive to the selected faces; shared verts
+        # would drag neighbouring polygons down with them.
         vert_users: dict[int, set[int]] = {}
         for f in bm.faces:
             for v in f.verts:
@@ -418,11 +372,6 @@ class SOLLUMZ_OT_navmesh_sink_polys(Operator):
 
 
 class SOLLUMZ_OT_navmesh_refresh_materials(Operator):
-    """Re-route every polygon to the material matching its current flags.
-
-    Object Mode only — bulk operation across the whole mesh. Run this after
-    bulk editing the flag attributes directly (script, Geometry Nodes).
-    """
     bl_idname = "sollumz.navmesh_refresh_materials"
     bl_label = "Refresh NavMesh Materials"
     bl_options = {"REGISTER", "UNDO"}
